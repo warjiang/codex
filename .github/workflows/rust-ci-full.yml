@@ -552,7 +552,7 @@ jobs:
             remote_env: "true"
             runs_on:
               group: codex-runners
-              labels: codex-linux-x64
+              labels: codex-linux-x64-xl
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             profile: dev
@@ -562,9 +562,10 @@ jobs:
           - runner: windows-x64
             target: x86_64-pc-windows-msvc
             profile: dev
+            nextest_args: --test-threads 16
             runs_on:
               group: codex-runners
-              labels: codex-windows-x64
+              labels: codex-windows-x64-xl
           - runner: windows-arm64
             target: aarch64-pc-windows-msvc
             profile: dev
@@ -682,7 +683,7 @@ jobs:
 
       - name: tests
         id: test
-        run: cargo nextest run --no-fail-fast --target ${{ matrix.target }} --cargo-profile ci-test --timings
+        run: cargo nextest run --no-fail-fast --target ${{ matrix.target }} --cargo-profile ci-test --timings ${{ matrix.nextest_args }}
         env:
           RUST_BACKTRACE: 1
           RUST_MIN_STACK: "8388608" # 8 MiB
