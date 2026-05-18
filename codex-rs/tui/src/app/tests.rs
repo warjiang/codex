@@ -3754,6 +3754,9 @@ async fn make_test_app() -> App {
         file_search,
         transcript_cells: Vec::new(),
         overlay: None,
+        transcript_overlay_state: crate::pager_overlay::TranscriptOverlayState::new(
+            crate::history_cell::HistoryRenderMode::Rich,
+        ),
         deferred_history_lines: Vec::new(),
         has_emitted_history_lines: false,
         transcript_reflow: TranscriptReflowState::default(),
@@ -3817,6 +3820,9 @@ async fn make_test_app_with_channels() -> (
             file_search,
             transcript_cells: Vec::new(),
             overlay: None,
+            transcript_overlay_state: crate::pager_overlay::TranscriptOverlayState::new(
+                crate::history_cell::HistoryRenderMode::Rich,
+            ),
             deferred_history_lines: Vec::new(),
             has_emitted_history_lines: false,
             transcript_reflow: TranscriptReflowState::default(),
@@ -4909,6 +4915,9 @@ async fn queued_rollback_syncs_overlay_and_clears_deferred_history() {
     app.overlay = Some(Overlay::new_transcript(
         app.transcript_cells.clone(),
         app.keymap.pager.clone(),
+        app.keymap.app.copy.clone(),
+        app.keymap.app.toggle_raw_output.clone(),
+        app.transcript_overlay_state,
     ));
     app.deferred_history_lines = vec![Line::from("stale buffered line")];
     app.backtrack.overlay_preview_active = true;
@@ -5443,6 +5452,11 @@ async fn clear_only_ui_reset_preserves_chat_session_state() {
     app.overlay = Some(Overlay::new_transcript(
         app.transcript_cells.clone(),
         crate::keymap::RuntimeKeymap::defaults().pager,
+        Vec::new(),
+        Vec::new(),
+        crate::pager_overlay::TranscriptOverlayState::new(
+            crate::history_cell::HistoryRenderMode::Rich,
+        ),
     ));
     app.deferred_history_lines = vec![Line::from("stale buffered line")];
     app.has_emitted_history_lines = true;
