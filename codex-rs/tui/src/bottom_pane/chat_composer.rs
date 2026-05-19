@@ -6848,7 +6848,7 @@ mod tests {
 
         let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         assert_eq!(composer.draft.textarea.cursor(), "go".len());
-        assert!(matches!(composer.popups.active, ActivePopup::None));
+        assert!(matches!(composer.popups.active, ActivePopup::MentionV2(_)));
     }
 
     #[test]
