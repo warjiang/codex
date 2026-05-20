@@ -158,16 +158,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--allow-legacy-codex-package",
-        action="store_true",
-        # This legacy installer already consumes per-binary artifacts; keep the
-        # flag so newer staging workflows can call older PR branches.
-        help=(
-            "Accepted as a no-op compatibility flag for staging workflows that "
-            "may synthesize codex-package layouts from legacy per-binary artifacts."
-        ),
-    )
-    parser.add_argument(
         "root",
         nargs="?",
         type=Path,
