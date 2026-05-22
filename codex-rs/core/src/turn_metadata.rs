@@ -20,6 +20,8 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
@@ -68,6 +70,48 @@ impl From<WorkspaceGitMetadata> for TurnMetadataWorkspace {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TurnMetadataSubagentType {
+    Review,
+    Compact,
+    ThreadSpawn,
+    MemoryConsolidation,
+    Other,
+}
+
+fn subagent_metadata(
+    session_source: &SessionSource,
+) -> (Option<ThreadId>, Option<TurnMetadataSubagentType>) {
+    match session_source {
+        SessionSource::SubAgent(SubAgentSource::Review) => {
+            (None, Some(TurnMetadataSubagentType::Review))
+        }
+        SessionSource::SubAgent(SubAgentSource::Compact) => {
+            (None, Some(TurnMetadataSubagentType::Compact))
+        }
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id, ..
+        }) => (
+            Some(*parent_thread_id),
+            Some(TurnMetadataSubagentType::ThreadSpawn),
+        ),
+        SessionSource::SubAgent(SubAgentSource::MemoryConsolidation) => {
+            (None, Some(TurnMetadataSubagentType::MemoryConsolidation))
+        }
+        SessionSource::SubAgent(SubAgentSource::Other(_)) => {
+            (None, Some(TurnMetadataSubagentType::Other))
+        }
+        SessionSource::Cli
+        | SessionSource::VSCode
+        | SessionSource::Exec
+        | SessionSource::Mcp
+        | SessionSource::Custom(_)
+        | SessionSource::Internal(_)
+        | SessionSource::Unknown => (None, None),
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Default)]
 pub(crate) struct TurnMetadataBag {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -76,6 +120,10 @@ pub(crate) struct TurnMetadataBag {
     thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     forked_from_thread_id: Option<ThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_thread_id: Option<ThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subagent_type: Option<TurnMetadataSubagentType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     thread_source: Option<ThreadSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,6 +166,8 @@ fn merge_turn_metadata(
                     | "turn_id"
                     | TURN_STARTED_AT_UNIX_MS_KEY
                     | "forked_from_thread_id"
+                    | "parent_thread_id"
+                    | "subagent_type"
             ) {
                 continue;
             }
@@ -133,6 +183,8 @@ fn build_turn_metadata_bag(
     session_id: Option<String>,
     thread_id: Option<String>,
     forked_from_thread_id: Option<ThreadId>,
+    parent_thread_id: Option<ThreadId>,
+    subagent_type: Option<TurnMetadataSubagentType>,
     thread_source: Option<ThreadSource>,
     turn_id: Option<String>,
     sandbox: Option<String>,
@@ -150,6 +202,8 @@ fn build_turn_metadata_bag(
         session_id,
         thread_id,
         forked_from_thread_id,
+        parent_thread_id,
+        subagent_type,
         thread_source,
         turn_id,
         workspaces,
@@ -181,6 +235,8 @@ pub async fn build_turn_metadata_header(
         /*session_id*/ None,
         /*thread_id*/ None,
         /*forked_from_thread_id*/ None,
+        /*parent_thread_id*/ None,
+        /*subagent_type*/ None,
         /*thread_source*/ None,
         /*turn_id*/ None,
         sandbox.map(ToString::to_string),
@@ -213,6 +269,7 @@ impl TurnMetadataState {
         session_id: String,
         thread_id: String,
         forked_from_thread_id: Option<ThreadId>,
+        session_source: &SessionSource,
         thread_source: Option<ThreadSource>,
         turn_id: String,
         cwd: AbsolutePathBuf,
@@ -229,10 +286,13 @@ impl TurnMetadataState {
             )
             .to_string(),
         );
+        let (parent_thread_id, subagent_type) = subagent_metadata(session_source);
         let base_metadata = build_turn_metadata_bag(
             Some(session_id),
             Some(thread_id),
             forked_from_thread_id,
+            parent_thread_id,
+            subagent_type,
             thread_source,
             Some(turn_id),
             sandbox,
