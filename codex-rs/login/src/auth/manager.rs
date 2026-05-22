@@ -89,9 +89,8 @@ struct ChatgptAuthState {
 
 const TOKEN_REFRESH_INTERVAL: i64 = 8;
 const CHATGPT_ACCESS_TOKEN_REFRESH_WINDOW_MINUTES: i64 = 5;
-const CHATGPT_ACCESS_TOKEN_PROACTIVE_REFRESH_LOCK_FILENAME: &str =
-    "chatgpt-access-token-proactive-refresh.lock";
-const CHATGPT_ACCESS_TOKEN_PROACTIVE_REFRESH_LOCK_POLL_INTERVAL_MS: u64 = 50;
+const CHATGPT_TOKEN_REFRESH_LOCK_FILENAME: &str = "chatgpt-token-refresh.lock";
+const CHATGPT_TOKEN_REFRESH_LOCK_POLL_INTERVAL_MS: u64 = 50;
 
 const REFRESH_TOKEN_EXPIRED_MESSAGE: &str = "Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.";
 const REFRESH_TOKEN_REUSED_MESSAGE: &str = "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.";
@@ -1688,7 +1687,22 @@ impl AuthManager {
     /// can assume that some other instance already refreshed it. If the persisted
     /// token is the same as the cached, then ask the token authority to refresh.
     pub async fn refresh_token(&self) -> Result<(), RefreshTokenError> {
+        let auth_before_wait = self.auth_cached();
+        let is_managed_chatgpt = matches!(auth_before_wait.as_ref(), Some(CodexAuth::Chatgpt(_)));
+        let _token_refresh_lock = if is_managed_chatgpt {
+            Some(self.acquire_chatgpt_token_refresh_lock().await?)
+        } else {
+            None
+        };
         let _refresh_guard = self.acquire_refresh_guard().await?;
+        if is_managed_chatgpt
+            && !Self::auths_equal_for_refresh(
+                auth_before_wait.as_ref(),
+                self.auth_cached().as_ref(),
+            )
+        {
+            return Ok(());
+        }
         self.refresh_token_after_guarded_reload().await
     }
 
@@ -1734,7 +1748,7 @@ impl AuthManager {
     }
 
     async fn proactively_refresh_token(&self) -> Result<(), RefreshTokenError> {
-        let _refresh_lock = self.acquire_chatgpt_proactive_refresh_lock().await?;
+        let _refresh_lock = self.acquire_chatgpt_token_refresh_lock().await?;
         let _refresh_guard = self.acquire_refresh_guard().await?;
         if !self
             .auth_cached()
@@ -1746,31 +1760,27 @@ impl AuthManager {
         self.refresh_token_after_guarded_reload().await
     }
 
-    async fn acquire_chatgpt_proactive_refresh_lock(&self) -> Result<File, RefreshTokenError> {
+    async fn acquire_chatgpt_token_refresh_lock(&self) -> Result<File, RefreshTokenError> {
         let mut logged_wait = false;
         loop {
-            if let Some(lock_file) = self.try_acquire_chatgpt_proactive_refresh_lock()? {
+            if let Some(lock_file) = self.try_acquire_chatgpt_token_refresh_lock()? {
                 return Ok(lock_file);
             }
             if !logged_wait {
                 tracing::info!(
-                    "Waiting to proactively refresh ChatGPT access token because another process is already refreshing it."
+                    "Waiting to refresh managed ChatGPT tokens because another process is already refreshing them."
                 );
                 logged_wait = true;
             }
             tokio::time::sleep(std::time::Duration::from_millis(
-                CHATGPT_ACCESS_TOKEN_PROACTIVE_REFRESH_LOCK_POLL_INTERVAL_MS,
+                CHATGPT_TOKEN_REFRESH_LOCK_POLL_INTERVAL_MS,
             ))
             .await;
         }
     }
 
-    fn try_acquire_chatgpt_proactive_refresh_lock(
-        &self,
-    ) -> Result<Option<File>, RefreshTokenError> {
-        let lock_path = self
-            .codex_home
-            .join(CHATGPT_ACCESS_TOKEN_PROACTIVE_REFRESH_LOCK_FILENAME);
+    fn try_acquire_chatgpt_token_refresh_lock(&self) -> Result<Option<File>, RefreshTokenError> {
+        let lock_path = self.codex_home.join(CHATGPT_TOKEN_REFRESH_LOCK_FILENAME);
         if let Some(parent) = lock_path.parent() {
             std::fs::create_dir_all(parent).map_err(RefreshTokenError::Transient)?;
         }
@@ -1793,10 +1803,14 @@ impl AuthManager {
     }
 
     /// Attempt to refresh the current auth token from the authority that issued
-    /// the token. On success, reloads the auth state from disk so other components
-    /// observe refreshed token. If the token refresh fails, returns the error to
-    /// the caller.
+    /// the token. Managed ChatGPT auth reuses tokens refreshed by another process
+    /// while waiting to serialize refresh-token rotation. On success, reloads the
+    /// auth state from disk so other components observe refreshed token. If the
+    /// token refresh fails, returns the error to the caller.
     pub async fn refresh_token_from_authority(&self) -> Result<(), RefreshTokenError> {
+        if matches!(self.auth_cached(), Some(CodexAuth::Chatgpt(_))) {
+            return self.refresh_token().await;
+        }
         let _refresh_guard = self.acquire_refresh_guard().await?;
         self.refresh_token_from_authority_impl().await
     }
