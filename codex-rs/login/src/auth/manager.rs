@@ -1688,12 +1688,22 @@ impl AuthManager {
     /// can assume that some other instance already refreshed it. If the persisted
     /// token is the same as the cached, then ask the token authority to refresh.
     pub async fn refresh_token(&self) -> Result<(), RefreshTokenError> {
-        let _refresh_guard = self.refresh_lock.acquire().await.map_err(|_| {
+        let _refresh_guard = self.acquire_refresh_guard().await?;
+        self.refresh_token_after_guarded_reload().await
+    }
+
+    async fn acquire_refresh_guard(
+        &self,
+    ) -> Result<tokio::sync::SemaphorePermit<'_>, RefreshTokenError> {
+        self.refresh_lock.acquire().await.map_err(|_| {
             RefreshTokenError::Permanent(RefreshTokenFailedError::new(
                 RefreshTokenFailedReason::Other,
                 REFRESH_TOKEN_UNKNOWN_MESSAGE.to_string(),
             ))
-        })?;
+        })
+    }
+
+    async fn refresh_token_after_guarded_reload(&self) -> Result<(), RefreshTokenError> {
         let auth_before_reload = self.auth_cached();
         if auth_before_reload
             .as_ref()
@@ -1725,7 +1735,15 @@ impl AuthManager {
 
     async fn proactively_refresh_token(&self) -> Result<(), RefreshTokenError> {
         let _refresh_lock = self.acquire_chatgpt_proactive_refresh_lock().await?;
-        self.refresh_token().await
+        let _refresh_guard = self.acquire_refresh_guard().await?;
+        if !self
+            .auth_cached()
+            .as_ref()
+            .is_some_and(Self::should_refresh_proactively)
+        {
+            return Ok(());
+        }
+        self.refresh_token_after_guarded_reload().await
     }
 
     async fn acquire_chatgpt_proactive_refresh_lock(&self) -> Result<File, RefreshTokenError> {
@@ -1779,12 +1797,7 @@ impl AuthManager {
     /// observe refreshed token. If the token refresh fails, returns the error to
     /// the caller.
     pub async fn refresh_token_from_authority(&self) -> Result<(), RefreshTokenError> {
-        let _refresh_guard = self.refresh_lock.acquire().await.map_err(|_| {
-            RefreshTokenError::Permanent(RefreshTokenFailedError::new(
-                RefreshTokenFailedReason::Other,
-                REFRESH_TOKEN_UNKNOWN_MESSAGE.to_string(),
-            ))
-        })?;
+        let _refresh_guard = self.acquire_refresh_guard().await?;
         self.refresh_token_from_authority_impl().await
     }
 

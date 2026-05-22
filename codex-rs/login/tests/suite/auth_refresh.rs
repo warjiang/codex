@@ -323,6 +323,69 @@ async fn auth_waits_while_proactive_refresh_lock_is_held() -> Result<()> {
 
 #[serial_test::serial(auth_refresh)]
 #[tokio::test]
+async fn concurrent_auth_requests_share_one_proactive_refresh() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "new-access-token",
+            "refresh_token": "new-refresh-token"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let ctx = RefreshTokenTestContext::new(&server).await?;
+    let near_expiry_access_token = access_token_with_expiration(Utc::now() + Duration::minutes(4));
+    let initial_tokens = build_tokens(&near_expiry_access_token, INITIAL_REFRESH_TOKEN);
+    ctx.write_auth(&AuthDotJson {
+        auth_mode: Some(AuthMode::Chatgpt),
+        openai_api_key: None,
+        tokens: Some(initial_tokens.clone()),
+        last_refresh: Some(Utc::now()),
+        agent_identity: None,
+    })
+    .await?;
+
+    let lock_file = ctx.hold_proactive_refresh_lock()?;
+    let first_manager = Arc::clone(&ctx.auth_manager);
+    let first = tokio::spawn(async move { first_manager.auth().await });
+    let second_manager = Arc::clone(&ctx.auth_manager);
+    let second = tokio::spawn(async move { second_manager.auth().await });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!first.is_finished());
+    assert!(!second.is_finished());
+    drop(lock_file);
+
+    let (first_auth, second_auth) = tokio::join!(first, second);
+    let refreshed_tokens = TokenData {
+        access_token: "new-access-token".to_string(),
+        refresh_token: "new-refresh-token".to_string(),
+        ..initial_tokens
+    };
+    for auth in [first_auth, second_auth] {
+        let auth = auth
+            .context("proactive refresh task should join")?
+            .context("auth should stay cached after the lock is released")?;
+        assert_eq!(
+            auth.get_token_data().context("token data should refresh")?,
+            refreshed_tokens
+        );
+    }
+    assert_eq!(
+        ctx.load_auth()?.tokens.context("tokens should exist")?,
+        refreshed_tokens
+    );
+    server.verify().await;
+
+    Ok(())
+}
+
+#[serial_test::serial(auth_refresh)]
+#[tokio::test]
 async fn refresh_token_does_not_wait_while_proactive_refresh_lock_is_held() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
