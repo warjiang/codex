@@ -227,6 +227,7 @@ mod guardian;
 mod helpers;
 mod history_replay;
 mod mcp_startup;
+mod next_prompt_suggestion;
 mod permissions;
 mod plan_mode;
 mod popups_and_settings;
