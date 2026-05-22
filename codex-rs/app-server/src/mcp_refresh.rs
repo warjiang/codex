@@ -189,7 +189,6 @@ mod tests {
                 thread_extensions(
                     guardian_agent_spawner(thread_manager.clone()),
                     auth_manager.clone(),
-                    Arc::clone(&thread_store),
                 ),
                 /*analytics_events_client*/ None,
                 Arc::clone(&thread_store),
