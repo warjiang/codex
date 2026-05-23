@@ -44,6 +44,8 @@ struct ToolPlanProbe {
     visible_specs: Vec<ToolSpec>,
     visible_names: Vec<String>,
     namespace_functions: BTreeMap<String, Vec<String>>,
+    prompt_usage_contributor_labels: Vec<String>,
+    tool_usage_contributor_labels: BTreeMap<String, Vec<String>>,
     registered_names: Vec<String>,
     exposures: BTreeMap<String, ToolExposure>,
 }
@@ -80,6 +82,26 @@ impl ToolPlanProbe {
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
+        let prompt_usage_contributor_labels = router
+            .usage_contributors()
+            .into_iter()
+            .map(|contributor| contributor.contributor.label)
+            .collect::<Vec<_>>();
+        let tool_usage_contributor_labels = registered_tool_names
+            .iter()
+            .filter_map(|name| {
+                let contributors = router.usage_contributors_for_tool_name(name);
+                (!contributors.is_empty()).then(|| {
+                    (
+                        name.to_string(),
+                        contributors
+                            .into_iter()
+                            .map(|contributor| contributor.label)
+                            .collect::<Vec<_>>(),
+                    )
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
         let exposures = registered_tool_names
             .iter()
             .filter_map(|name| {
@@ -93,6 +115,8 @@ impl ToolPlanProbe {
             visible_specs,
             visible_names,
             namespace_functions,
+            prompt_usage_contributor_labels,
+            tool_usage_contributor_labels,
             registered_names,
             exposures,
         }
@@ -146,6 +170,12 @@ impl ToolPlanProbe {
     fn namespace_function_names(&self, namespace: &str) -> &[String] {
         self.namespace_functions
             .get(namespace)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    fn tool_usage_contributor_labels(&self, tool_name: &str) -> &[String] {
+        self.tool_usage_contributor_labels
+            .get(tool_name)
             .map_or(&[], Vec::as_slice)
     }
 
@@ -461,6 +491,10 @@ async fn mcp_and_tool_search_follow_direct_and_deferred_tool_exposure() {
         direct_mcp.namespace_function_names("mcp__direct__"),
         &["lookup".to_string()]
     );
+    assert_eq!(
+        direct_mcp.prompt_usage_contributor_labels,
+        vec!["direct".to_string()]
+    );
 
     let searchable_mcp = ToolPlanInputs {
         deferred_mcp_tools: Some(vec![mcp_tool("searchable", "mcp__searchable__", "lookup")]),
@@ -504,6 +538,22 @@ async fn mcp_and_tool_search_follow_direct_and_deferred_tool_exposure() {
     .await;
     missing_namespace_capability.assert_visible_lacks(&["tool_search"]);
 
+    let dropped_namespace_spec = probe_with(
+        |turn| {
+            use_bedrock_provider(turn);
+        },
+        ToolPlanInputs {
+            mcp_tools: Some(vec![mcp_tool("dropped", "mcp__dropped__", "lookup")]),
+            ..ToolPlanInputs::default()
+        },
+    )
+    .await;
+    dropped_namespace_spec.assert_visible_lacks(&["mcp__dropped__"]);
+    assert_eq!(
+        dropped_namespace_spec.prompt_usage_contributor_labels,
+        Vec::<String>::new()
+    );
+
     let enabled = probe_with(
         |turn| {
             turn.model_info.supports_search_tool = true;
@@ -513,6 +563,10 @@ async fn mcp_and_tool_search_follow_direct_and_deferred_tool_exposure() {
     .await;
     enabled.assert_visible_contains(&["tool_search"]);
     enabled.assert_registered_contains(&["tool_search", "mcp__searchable__lookup"]);
+    assert_eq!(
+        enabled.tool_usage_contributor_labels("mcp__searchable__lookup"),
+        ["searchable".to_string()].as_slice()
+    );
 }
 
 #[tokio::test]
