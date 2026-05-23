@@ -2,10 +2,15 @@ use anyhow::Result;
 use app_test_support::ChatGptAuthFixture;
 use app_test_support::DEFAULT_CLIENT_NAME;
 use app_test_support::write_chatgpt_auth;
+use codex_analytics::AnalyticsEventsClient;
+use codex_analytics::SubAgentThreadStartedInput;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_config::types::OtelExporterKind;
 use codex_config::types::OtelHttpProtocol;
 use codex_core::config::ConfigBuilder;
+use codex_login::AuthManager;
+use codex_login::CodexAuth;
+use codex_protocol::protocol::SubAgentSource;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -168,11 +173,13 @@ pub(crate) fn thread_initialized_event(payload: &Value) -> Result<&Value> {
 pub(crate) fn assert_basic_thread_initialized_event(
     event: &Value,
     thread_id: &str,
+    session_id: &str,
     expected_model: &str,
     initialization_mode: &str,
     expected_thread_source: &str,
 ) {
     assert_eq!(event["event_params"]["thread_id"], thread_id);
+    assert_eq!(event["event_params"]["session_id"], session_id);
     assert_eq!(
         event["event_params"]["app_server_client"]["product_client_id"],
         DEFAULT_CLIENT_NAME
@@ -204,4 +211,41 @@ pub(crate) fn assert_basic_thread_initialized_event(
         initialization_mode
     );
     assert!(event["event_params"]["created_at"].as_u64().is_some());
+}
+
+#[tokio::test]
+async fn subagent_thread_initialization_sends_grouped_session_id_in_event_params() -> Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/analytics-events/events"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let client = AnalyticsEventsClient::new(
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+        server.uri(),
+        /*analytics_enabled*/ Some(true),
+    );
+
+    client.track_subagent_thread_started(SubAgentThreadStartedInput {
+        session_id: "session-root".to_string(),
+        thread_id: "thread-child".to_string(),
+        parent_thread_id: Some("thread-parent".to_string()),
+        product_client_id: "codex-tui".to_string(),
+        client_name: "codex-tui".to_string(),
+        client_version: "1.0.0".to_string(),
+        model: "gpt-5".to_string(),
+        ephemeral: false,
+        subagent_source: SubAgentSource::Other("guardian".to_string()),
+        created_at: 1,
+    });
+
+    let event =
+        wait_for_analytics_event(&server, Duration::from_secs(2), "codex_thread_initialized")
+            .await?;
+    assert_eq!(event["event_params"]["session_id"], "session-root");
+    assert_eq!(event["event_params"]["thread_id"], "thread-child");
+    assert_eq!(event["event_params"]["parent_thread_id"], "thread-parent");
+
+    Ok(())
 }
