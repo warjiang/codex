@@ -4,17 +4,88 @@ use crate::sandbox_tags::permission_profile_sandbox_tag;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::ThreadSource;
+use core_test_support::PathBufExt;
 use core_test_support::PathExt;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use std::collections::HashMap;
 use tempfile::TempDir;
+use tokio::process::Command;
 
 fn test_mcp_turn_metadata_context() -> McpTurnMetadataContext<'static> {
     McpTurnMetadataContext {
         model: "gpt-5.4",
         reasoning_effort: Some(ReasoningEffortConfig::High),
     }
+}
+
+#[tokio::test]
+async fn build_turn_metadata_header_marks_detached_memory_without_turn_identity() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let repo_path = temp_dir.path().join("repo-東京").abs();
+    std::fs::create_dir_all(&repo_path).expect("create repo");
+
+    Command::new("git")
+        .args(["init"])
+        .current_dir(&repo_path)
+        .output()
+        .await
+        .expect("git init");
+    Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(&repo_path)
+        .output()
+        .await
+        .expect("git config user.name");
+    Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(&repo_path)
+        .output()
+        .await
+        .expect("git config user.email");
+
+    std::fs::write(repo_path.join("README.md"), "hello").expect("write file");
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(&repo_path)
+        .output()
+        .await
+        .expect("git add");
+    Command::new("git")
+        .args(["commit", "-m", "initial"])
+        .current_dir(&repo_path)
+        .output()
+        .await
+        .expect("git commit");
+
+    let header = build_turn_metadata_header(&repo_path, Some("none"))
+        .await
+        .expect("header");
+    assert!(header.is_ascii());
+    assert!(!header.contains("東京"));
+    let parsed: Value = serde_json::from_str(&header).expect("valid json");
+    assert_eq!(parsed["request_kind"].as_str(), Some("memory"));
+    assert!(parsed.get("session_id").is_none());
+    assert!(parsed.get("thread_id").is_none());
+    assert!(parsed.get("turn_id").is_none());
+
+    let expected_repo_path = repo_path.to_string_lossy().into_owned();
+    let actual_repo_path = parsed
+        .get("workspaces")
+        .and_then(Value::as_object)
+        .and_then(|workspaces| workspaces.keys().next())
+        .expect("workspace path");
+    assert_eq!(actual_repo_path, &expected_repo_path);
+    let workspace = parsed
+        .get("workspaces")
+        .and_then(Value::as_object)
+        .and_then(|workspaces| workspaces.values().next())
+        .cloned()
+        .expect("workspace");
+    assert_eq!(
+        workspace.get("has_changes").and_then(Value::as_bool),
+        Some(false)
+    );
 }
 
 #[test]
