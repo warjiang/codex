@@ -75,6 +75,36 @@ async fn resumed_initial_messages_render_history() {
 }
 
 #[tokio::test]
+async fn replayed_user_messages_seed_composer_history() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.bottom_pane.set_history_metadata(
+        ThreadId::new(),
+        /*log_id*/ 1,
+        /*entry_count*/ 10,
+    );
+
+    replay_user_message_text(
+        &mut chat,
+        "user-1",
+        "first prompt",
+        ReplayKind::ResumeInitialMessages,
+    );
+    replay_user_message_text(
+        &mut chat,
+        "user-2",
+        "second prompt",
+        ReplayKind::ResumeInitialMessages,
+    );
+    drain_insert_history(&mut rx);
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(chat.bottom_pane.composer_text(), "second prompt");
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(chat.bottom_pane.composer_text(), "first prompt");
+}
+
+#[tokio::test]
 async fn replayed_user_message_preserves_text_elements_and_local_images() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
 

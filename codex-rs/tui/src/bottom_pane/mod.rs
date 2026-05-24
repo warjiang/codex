@@ -1530,6 +1530,21 @@ impl BottomPane {
         }
     }
 
+    pub(crate) fn record_replayed_user_message_history(
+        &mut self,
+        text: String,
+        text_elements: Vec<TextElement>,
+        local_image_paths: Vec<PathBuf>,
+        remote_image_urls: Vec<String>,
+    ) {
+        self.composer.record_replayed_user_message_history(
+            text,
+            text_elements,
+            local_image_paths,
+            remote_image_urls,
+        );
+    }
+
     pub(crate) fn on_file_search_result(&mut self, query: String, matches: Vec<FileMatch>) {
         self.composer.on_file_search_result(query, matches);
         self.request_redraw();

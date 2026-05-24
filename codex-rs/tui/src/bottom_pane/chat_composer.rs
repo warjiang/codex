@@ -855,6 +855,23 @@ impl ChatComposer {
         }
     }
 
+    pub(crate) fn record_replayed_user_message_history(
+        &mut self,
+        text: String,
+        text_elements: Vec<TextElement>,
+        local_image_paths: Vec<PathBuf>,
+        remote_image_urls: Vec<String>,
+    ) {
+        self.history.record_local_submission(HistoryEntry {
+            text,
+            text_elements,
+            local_image_paths,
+            remote_image_urls,
+            mention_bindings: Vec::new(),
+            pending_pastes: Vec::new(),
+        });
+    }
+
     /// Integrate pasted text into the composer.
     ///
     /// Acts as the only place where paste text is integrated, both for:

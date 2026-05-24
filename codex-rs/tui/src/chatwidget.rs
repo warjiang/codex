@@ -1211,6 +1211,12 @@ impl ChatWidget {
     fn on_committed_user_message(&mut self, items: &[UserInput], from_replay: bool) {
         let display = Self::user_message_display_from_inputs(items);
         if from_replay {
+            self.bottom_pane.record_replayed_user_message_history(
+                display.message.clone(),
+                display.text_elements.clone(),
+                display.local_images.clone(),
+                display.remote_image_urls.clone(),
+            );
             if !self.review.is_review_mode {
                 self.on_user_message_display(display);
             }
