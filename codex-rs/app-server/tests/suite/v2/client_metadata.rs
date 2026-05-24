@@ -95,6 +95,10 @@ async fn turn_start_forwards_client_metadata_to_responses_request_v2() -> Result
     assert_eq!(metadata["origin"].as_str(), Some("gaas"));
     assert_eq!(metadata["turn_id"].as_str(), Some(turn.id.as_str()));
     assert!(metadata.get("session_id").is_some());
+    assert_eq!(
+        metadata["window_id"].as_str(),
+        request.header("x-codex-window-id").as_deref()
+    );
 
     Ok(())
 }
@@ -311,6 +315,10 @@ async fn turn_start_forwards_client_metadata_to_responses_websocket_request_body
     assert_eq!(metadata["origin"].as_str(), Some("gaas"));
     assert_eq!(metadata["turn_id"].as_str(), Some(turn.id.as_str()));
     assert!(metadata.get("session_id").is_some());
+    assert_eq!(
+        metadata["window_id"].as_str(),
+        request["client_metadata"]["x-codex-window-id"].as_str()
+    );
 
     websocket_server.shutdown().await;
     Ok(())

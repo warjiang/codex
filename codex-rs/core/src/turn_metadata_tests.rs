@@ -68,6 +68,7 @@ async fn build_turn_metadata_header_marks_detached_memory_without_turn_identity(
     assert!(parsed.get("session_id").is_none());
     assert!(parsed.get("thread_id").is_none());
     assert!(parsed.get("turn_id").is_none());
+    assert!(parsed.get(WINDOW_ID_KEY).is_none());
 
     let expected_repo_path = repo_path.to_string_lossy().into_owned();
     let actual_repo_path = parsed
@@ -325,6 +326,7 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
         ("session_id".to_string(), "client-supplied".to_string()),
         ("thread_id".to_string(), "client-supplied".to_string()),
         ("turn_id".to_string(), "client-supplied".to_string()),
+        (WINDOW_ID_KEY.to_string(), "client-supplied".to_string()),
         ("thread_source".to_string(), "client-supplied".to_string()),
         ("request_kind".to_string(), "client-supplied".to_string()),
         (
@@ -348,9 +350,20 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
     assert_eq!(json["thread_source"].as_str(), Some("user"));
     assert_eq!(json["turn_id"].as_str(), Some("turn-a"));
     assert_eq!(json["request_kind"].as_str(), Some("turn"));
+    assert!(json.get(WINDOW_ID_KEY).is_none());
     assert_eq!(
         json["turn_started_at_unix_ms"].as_i64(),
         Some(1_700_000_000_123)
+    );
+
+    let model_request_header = state
+        .current_header_value_for_model_request("thread-a:1")
+        .expect("model request header");
+    let model_request_json: Value =
+        serde_json::from_str(&model_request_header).expect("model request json");
+    assert_eq!(
+        model_request_json[WINDOW_ID_KEY].as_str(),
+        Some("thread-a:1")
     );
 
     let meta = state
@@ -358,6 +371,7 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
         .expect("turn metadata should be present");
     assert_eq!(meta["model"].as_str(), Some("gpt-5.4"));
     assert_eq!(meta["reasoning_effort"].as_str(), Some("high"));
+    assert!(meta.get(WINDOW_ID_KEY).is_none());
 }
 
 #[test]
@@ -381,16 +395,20 @@ fn turn_metadata_state_overlays_compaction_only_on_compaction_requests() {
     )]));
 
     let compact_header = state
-        .current_header_value_for_compaction(CompactionTurnMetadata::new(
-            CompactionTrigger::Auto,
-            CompactionReason::ContextLimit,
-            CompactionImplementation::ResponsesCompactionV2,
-            CompactionPhase::MidTurn,
-        ))
+        .current_header_value_for_compaction(
+            "thread-a:2",
+            CompactionTurnMetadata::new(
+                CompactionTrigger::Auto,
+                CompactionReason::ContextLimit,
+                CompactionImplementation::ResponsesCompactionV2,
+                CompactionPhase::MidTurn,
+            ),
+        )
         .expect("compact header");
     let compact_json: Value = serde_json::from_str(&compact_header).expect("json");
     assert_eq!(compact_json["request_kind"].as_str(), Some("compaction"));
     assert_eq!(compact_json["turn_id"].as_str(), Some("turn-a"));
+    assert_eq!(compact_json[WINDOW_ID_KEY].as_str(), Some("thread-a:2"));
     assert_eq!(
         compact_json["compaction"],
         serde_json::json!({
@@ -402,8 +420,11 @@ fn turn_metadata_state_overlays_compaction_only_on_compaction_requests() {
         })
     );
 
-    let regular_header = state.current_header_value().expect("regular header");
+    let regular_header = state
+        .current_header_value_for_model_request("thread-a:3")
+        .expect("regular header");
     let regular_json: Value = serde_json::from_str(&regular_header).expect("json");
     assert_eq!(regular_json["request_kind"].as_str(), Some("turn"));
+    assert_eq!(regular_json[WINDOW_ID_KEY].as_str(), Some("thread-a:3"));
     assert!(regular_json.get("compaction").is_none());
 }

@@ -383,6 +383,10 @@ async fn remote_compact_replaces_history_for_followups() -> Result<()> {
         Some("compaction")
     );
     assert_eq!(
+        compact_metadata["window_id"].as_str(),
+        compact_request.header("x-codex-window-id").as_deref()
+    );
+    assert_eq!(
         compact_metadata["compaction"],
         json!({
             "trigger": "manual",
@@ -459,6 +463,14 @@ async fn remote_compact_replaces_history_for_followups() -> Result<()> {
     assert_ne!(
         follow_up_metadata["turn_id"], compact_metadata["turn_id"],
         "the following user turn should not reuse a manual compact turn id"
+    );
+    assert_eq!(
+        follow_up_metadata["window_id"].as_str(),
+        follow_up_request.header("x-codex-window-id").as_deref()
+    );
+    assert_ne!(
+        follow_up_metadata["window_id"], compact_metadata["window_id"],
+        "the following user turn should use the new compacted context window"
     );
     let follow_up_body = follow_up_request.body_json().to_string();
     assert!(
@@ -852,6 +864,10 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
     assert_eq!(
         compact_metadata["request_kind"].as_str(),
         Some("compaction")
+    );
+    assert_eq!(
+        compact_metadata["window_id"].as_str(),
+        compact_request.header("x-codex-window-id").as_deref()
     );
     assert_eq!(
         compact_metadata["compaction"],
@@ -1287,6 +1303,10 @@ async fn remote_compact_runs_automatically() -> Result<()> {
         initial_metadata["turn_id"], compact_metadata["turn_id"],
         "automatic mid-turn compaction should keep the current turn id"
     );
+    assert_eq!(
+        initial_metadata["window_id"], compact_metadata["window_id"],
+        "automatic mid-turn compaction summarizes the current context window"
+    );
     let follow_up_request = responses_mock.single_request();
     let follow_up_metadata: Value = serde_json::from_str(
         &follow_up_request
@@ -1303,6 +1323,10 @@ async fn remote_compact_runs_automatically() -> Result<()> {
     assert_eq!(
         follow_up_metadata["turn_id"], compact_metadata["turn_id"],
         "automatic mid-turn continuation should keep the current turn id"
+    );
+    assert_ne!(
+        follow_up_metadata["window_id"], compact_metadata["window_id"],
+        "post-compaction continuation should use the next context window"
     );
     let follow_up_body = follow_up_request.body_json().to_string();
     assert!(follow_up_body.contains("REMOTE_COMPACTED_SUMMARY"));

@@ -33,6 +33,7 @@ const TURN_STARTED_AT_UNIX_MS_KEY: &str = "turn_started_at_unix_ms";
 const USER_INPUT_REQUESTED_DURING_TURN_KEY: &str = "user_input_requested_during_turn";
 const REQUEST_KIND_KEY: &str = "request_kind";
 const COMPACTION_KEY: &str = "compaction";
+const WINDOW_ID_KEY: &str = "window_id";
 
 pub(crate) struct McpTurnMetadataContext<'a> {
     pub(crate) model: &'a str,
@@ -115,7 +116,8 @@ impl From<WorkspaceGitMetadata> for TurnMetadataWorkspace {
 /// Base payload for the outbound model request `x-codex-turn-metadata` header.
 ///
 /// Turn-owned requests populate the identity fields. Detached requests such as memory startup
-/// may still emit workspace metadata without pretending to own a foreground turn.
+/// may still emit workspace metadata without pretending to own a foreground turn. The current
+/// logical context-window ID is overlaid only when a turn-owned model request is dispatched.
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct TurnMetadataBag {
     request_kind: TurnMetadataRequestKind,
@@ -229,7 +231,7 @@ fn merge_turn_metadata(
     }
     if let Some(responsesapi_client_metadata) = responsesapi_client_metadata {
         for (key, value) in responsesapi_client_metadata {
-            if key == TURN_STARTED_AT_UNIX_MS_KEY || key == COMPACTION_KEY {
+            if key == TURN_STARTED_AT_UNIX_MS_KEY || key == COMPACTION_KEY || key == WINDOW_ID_KEY {
                 continue;
             }
             metadata
@@ -362,11 +364,22 @@ impl TurnMetadataState {
         Some(Value::Object(metadata))
     }
 
+    pub(crate) fn current_header_value_for_model_request(&self, window_id: &str) -> Option<String> {
+        let header = self.current_header_value()?;
+        let mut metadata = serde_json::from_str::<serde_json::Map<String, Value>>(&header).ok()?;
+        metadata.insert(
+            WINDOW_ID_KEY.to_string(),
+            Value::String(window_id.to_string()),
+        );
+        to_ascii_json_string(&metadata).ok()
+    }
+
     pub(crate) fn current_header_value_for_compaction(
         &self,
+        window_id: &str,
         compaction: CompactionTurnMetadata,
     ) -> Option<String> {
-        let header = self.current_header_value()?;
+        let header = self.current_header_value_for_model_request(window_id)?;
         let mut metadata = serde_json::from_str::<serde_json::Map<String, Value>>(&header).ok()?;
         metadata.insert(
             REQUEST_KIND_KEY.to_string(),
