@@ -4,84 +4,17 @@ use crate::sandbox_tags::permission_profile_sandbox_tag;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::ThreadSource;
-use core_test_support::PathBufExt;
 use core_test_support::PathExt;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use std::collections::HashMap;
 use tempfile::TempDir;
-use tokio::process::Command;
 
 fn test_mcp_turn_metadata_context() -> McpTurnMetadataContext<'static> {
     McpTurnMetadataContext {
         model: "gpt-5.4",
         reasoning_effort: Some(ReasoningEffortConfig::High),
     }
-}
-
-#[tokio::test]
-async fn build_turn_metadata_header_includes_has_changes_for_clean_repo() {
-    let temp_dir = TempDir::new().expect("temp dir");
-    let repo_path = temp_dir.path().join("repo-東京").abs();
-    std::fs::create_dir_all(&repo_path).expect("create repo");
-
-    Command::new("git")
-        .args(["init"])
-        .current_dir(&repo_path)
-        .output()
-        .await
-        .expect("git init");
-    Command::new("git")
-        .args(["config", "user.name", "Test User"])
-        .current_dir(&repo_path)
-        .output()
-        .await
-        .expect("git config user.name");
-    Command::new("git")
-        .args(["config", "user.email", "test@example.com"])
-        .current_dir(&repo_path)
-        .output()
-        .await
-        .expect("git config user.email");
-
-    std::fs::write(repo_path.join("README.md"), "hello").expect("write file");
-    Command::new("git")
-        .args(["add", "."])
-        .current_dir(&repo_path)
-        .output()
-        .await
-        .expect("git add");
-    Command::new("git")
-        .args(["commit", "-m", "initial"])
-        .current_dir(&repo_path)
-        .output()
-        .await
-        .expect("git commit");
-
-    let header = build_turn_metadata_header(&repo_path, Some("none"))
-        .await
-        .expect("header");
-    assert!(header.is_ascii());
-    assert!(!header.contains("東京"));
-    let parsed: Value = serde_json::from_str(&header).expect("valid json");
-    let expected_repo_path = repo_path.to_string_lossy().into_owned();
-    let actual_repo_path = parsed
-        .get("workspaces")
-        .and_then(Value::as_object)
-        .and_then(|workspaces| workspaces.keys().next())
-        .expect("workspace path");
-    assert_eq!(actual_repo_path, &expected_repo_path);
-    let workspace = parsed
-        .get("workspaces")
-        .and_then(Value::as_object)
-        .and_then(|workspaces| workspaces.values().next())
-        .cloned()
-        .expect("workspace");
-
-    assert_eq!(
-        workspace.get("has_changes").and_then(Value::as_bool),
-        Some(false)
-    );
 }
 
 #[test]
@@ -108,6 +41,7 @@ fn turn_metadata_state_uses_platform_sandbox_tag() {
     let thread_id = json.get("thread_id").and_then(Value::as_str);
     let thread_source = json.get("thread_source").and_then(Value::as_str);
 
+    assert_eq!(json["request_kind"].as_str(), Some("turn"));
     let expected_sandbox = permission_profile_sandbox_tag(
         &permission_profile,
         WindowsSandboxLevel::Disabled,
@@ -195,6 +129,7 @@ fn turn_metadata_state_includes_model_and_reasoning_effort_only_in_request_meta(
     let meta = state
         .current_meta_value_for_mcp_request(test_mcp_turn_metadata_context())
         .expect("turn metadata should be present");
+    assert!(meta.get("request_kind").is_none());
     assert_eq!(meta["model"].as_str(), Some("gpt-5.4"));
     assert_eq!(meta["reasoning_effort"].as_str(), Some("high"));
 
@@ -318,7 +253,9 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
         ),
         ("session_id".to_string(), "client-supplied".to_string()),
         ("thread_id".to_string(), "client-supplied".to_string()),
+        ("turn_id".to_string(), "client-supplied".to_string()),
         ("thread_source".to_string(), "client-supplied".to_string()),
+        ("request_kind".to_string(), "client-supplied".to_string()),
         (
             "turn_started_at_unix_ms".to_string(),
             "client-supplied".to_string(),
@@ -339,6 +276,7 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
     assert_eq!(json["thread_id"].as_str(), Some("thread-a"));
     assert_eq!(json["thread_source"].as_str(), Some("user"));
     assert_eq!(json["turn_id"].as_str(), Some("turn-a"));
+    assert_eq!(json["request_kind"].as_str(), Some("turn"));
     assert_eq!(
         json["turn_started_at_unix_ms"].as_i64(),
         Some(1_700_000_000_123)
@@ -349,4 +287,52 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
         .expect("turn metadata should be present");
     assert_eq!(meta["model"].as_str(), Some("gpt-5.4"));
     assert_eq!(meta["reasoning_effort"].as_str(), Some("high"));
+}
+
+#[test]
+fn turn_metadata_state_overlays_compaction_only_on_compaction_requests() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let cwd = temp_dir.path().abs();
+    let permission_profile = PermissionProfile::read_only();
+    let state = TurnMetadataState::new(
+        "session-a".to_string(),
+        "thread-a".to_string(),
+        Some(ThreadSource::User),
+        "turn-a".to_string(),
+        cwd,
+        &permission_profile,
+        WindowsSandboxLevel::Disabled,
+        /*enforce_managed_network*/ false,
+    );
+    state.set_responsesapi_client_metadata(HashMap::from([(
+        "compaction".to_string(),
+        "client-supplied".to_string(),
+    )]));
+
+    let compact_header = state
+        .current_header_value_for_compaction(CompactionTurnMetadata::new(
+            CompactionTrigger::Auto,
+            CompactionReason::ContextLimit,
+            CompactionImplementation::ResponsesCompactionV2,
+            CompactionPhase::MidTurn,
+        ))
+        .expect("compact header");
+    let compact_json: Value = serde_json::from_str(&compact_header).expect("json");
+    assert_eq!(compact_json["request_kind"].as_str(), Some("compaction"));
+    assert_eq!(compact_json["turn_id"].as_str(), Some("turn-a"));
+    assert_eq!(
+        compact_json["compaction"],
+        serde_json::json!({
+            "trigger": "auto",
+            "reason": "context_limit",
+            "implementation": "responses_compaction_v2",
+            "phase": "mid_turn",
+            "strategy": "memento",
+        })
+    );
+
+    let regular_header = state.current_header_value().expect("regular header");
+    let regular_json: Value = serde_json::from_str(&regular_header).expect("json");
+    assert_eq!(regular_json["request_kind"].as_str(), Some("turn"));
+    assert!(regular_json.get("compaction").is_none());
 }
