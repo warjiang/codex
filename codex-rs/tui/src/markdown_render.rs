@@ -38,7 +38,11 @@
 
 use crate::render::highlight::highlight_code_to_lines;
 use crate::render::line_utils::line_to_static;
-use crate::render::line_utils::push_owned_lines;
+use crate::terminal_hyperlinks::HyperlinkLine;
+use crate::terminal_hyperlinks::annotate_web_urls_in_line;
+use crate::terminal_hyperlinks::remap_wrapped_line;
+use crate::terminal_hyperlinks::visible_lines;
+use crate::terminal_hyperlinks::web_destination;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_line;
 use crate::wrapping::word_wrap_line;
@@ -128,7 +132,7 @@ impl IndentContext {
 /// `lines` are used for final rendering.
 #[derive(Clone, Debug, Default)]
 struct TableCell {
-    lines: Vec<Line<'static>>,
+    lines: Vec<HyperlinkLine>,
 }
 
 // TableCell mutators inlined — called per-span during table event parsing.
@@ -136,7 +140,7 @@ impl TableCell {
     #[inline]
     fn ensure_line(&mut self) {
         if self.lines.is_empty() {
-            self.lines.push(Line::default());
+            self.lines.push(HyperlinkLine::new(Line::default()));
         }
     }
 
@@ -144,13 +148,26 @@ impl TableCell {
     fn push_span(&mut self, span: Span<'static>) {
         self.ensure_line();
         if let Some(line) = self.lines.last_mut() {
-            line.push_span(span);
+            line.line.push_span(span);
+        }
+    }
+
+    fn push_annotated(&mut self, mut appended: HyperlinkLine) {
+        self.ensure_line();
+        if let Some(line) = self.lines.last_mut() {
+            let shift = line.width();
+            line.line.spans.append(&mut appended.line.spans);
+            line.hyperlinks
+                .extend(appended.hyperlinks.into_iter().map(|mut link| {
+                    link.columns = link.columns.start + shift..link.columns.end + shift;
+                    link
+                }));
         }
     }
 
     #[inline]
     fn hard_break(&mut self) {
-        self.lines.push(Line::default());
+        self.lines.push(HyperlinkLine::new(Line::default()));
     }
 
     fn plain_text(&self) -> String {
@@ -160,7 +177,7 @@ impl TableCell {
             if i > 0 {
                 buf.push(' ');
             }
-            for span in &line.spans {
+            for span in &line.line.spans {
                 let _ = write!(buf, "{}", span.content);
             }
         }
@@ -212,9 +229,9 @@ impl TableState {
 /// `spillover_lines` are prose rows extracted from parser artifacts and should
 /// be routed through normal wrapping.
 struct RenderedTableLines {
-    table_lines: Vec<Line<'static>>,
+    table_lines: Vec<HyperlinkLine>,
     table_lines_prewrapped: bool,
-    spillover_lines: Vec<Line<'static>>,
+    spillover_lines: Vec<HyperlinkLine>,
 }
 
 /// Classification of a table column for width-allocation priority.
@@ -285,6 +302,16 @@ pub(crate) fn render_markdown_text_with_width_and_cwd(
     width: Option<usize>,
     cwd: Option<&Path>,
 ) -> Text<'static> {
+    Text::from(visible_lines(render_markdown_lines_with_width_and_cwd(
+        input, width, cwd,
+    )))
+}
+
+pub(crate) fn render_markdown_lines_with_width_and_cwd(
+    input: &str,
+    width: Option<usize>,
+    cwd: Option<&Path>,
+) -> Vec<HyperlinkLine> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TABLES);
@@ -336,7 +363,7 @@ where
 {
     input: &'a str,
     iter: I,
-    text: Text<'static>,
+    text: Vec<HyperlinkLine>,
     styles: MarkdownStyles,
     inline_styles: Vec<Style>,
     indent_stack: Vec<IndentContext>,
@@ -354,7 +381,7 @@ where
     cwd: Option<PathBuf>,
     line_ends_with_local_link_target: bool,
     pending_local_link_soft_break: bool,
-    current_line_content: Option<Line<'static>>,
+    current_line_content: Option<HyperlinkLine>,
     current_initial_indent: Vec<Span<'static>>,
     current_subsequent_indent: Vec<Span<'static>>,
     current_line_style: Style,
@@ -370,7 +397,7 @@ where
         Self {
             input,
             iter,
-            text: Text::default(),
+            text: Vec::new(),
             styles: MarkdownStyles::default(),
             inline_styles: Vec::new(),
             indent_stack: Vec::new(),
@@ -415,7 +442,7 @@ where
             Event::HardBreak => self.hard_break(),
             Event::Rule => {
                 self.flush_current_line();
-                if !self.text.lines.is_empty() {
+                if !self.text.is_empty() {
                     self.push_blank_line();
                 }
                 self.push_line(Line::from("———"));
@@ -609,12 +636,11 @@ where
             let has_content = self
                 .current_line_content
                 .as_ref()
-                .map(|line| !line.spans.is_empty())
+                .map(|line| !line.line.spans.is_empty())
                 .unwrap_or_else(|| {
                     self.text
-                        .lines
                         .last()
-                        .map(|line| !line.spans.is_empty())
+                        .map(|line| !line.line.spans.is_empty())
                         .unwrap_or(false)
                 });
             if has_content {
@@ -630,11 +656,8 @@ where
                 self.push_line(Line::default());
             }
             let content = line.to_string();
-            let span = Span::styled(
-                content,
-                self.inline_styles.last().copied().unwrap_or_default(),
-            );
-            self.push_span(span);
+            let style = self.inline_styles.last().copied().unwrap_or_default();
+            self.push_text_spans(&content, style);
         }
         self.needs_newline = false;
     }
@@ -788,7 +811,7 @@ where
             *item_contains_code_block = true;
         }
         self.flush_current_line();
-        if !self.text.lines.is_empty() {
+        if !self.text.is_empty() {
             self.push_blank_line();
         }
         self.in_code_block = true;
@@ -857,14 +880,14 @@ where
             if table_lines_prewrapped {
                 self.push_prewrapped_line(line, pending_marker_line);
             } else {
-                self.push_line(line);
+                self.push_hyperlink_line(line);
                 self.flush_current_line();
             }
             pending_marker_line = false;
         }
         self.pending_marker_line = false;
         for spillover_line in spillover_lines {
-            self.push_line(spillover_line);
+            self.push_hyperlink_line(spillover_line);
             self.flush_current_line();
         }
         self.needs_newline = true;
@@ -984,7 +1007,29 @@ where
             if i > 0 {
                 self.push_table_cell_hard_break();
             }
-            self.push_span_to_table_cell(Span::styled(line.to_string(), style));
+            self.push_text_spans_to_table_cell(line, style);
+        }
+    }
+
+    fn push_text_spans_to_table_cell(&mut self, text: &str, style: Style) {
+        let span = Span::styled(text.to_string(), style);
+        let destination = self
+            .link
+            .as_ref()
+            .and_then(|link| web_destination(&link.destination));
+        let mut annotated = if let Some(destination) = destination {
+            let mut annotated = HyperlinkLine::new(Line::default());
+            annotated.push_span(span, Some(&destination));
+            annotated
+        } else if self.in_code_block {
+            HyperlinkLine::new(Line::from(span))
+        } else {
+            annotate_web_urls_in_line(Line::from(span))
+        };
+        if let Some(table_state) = self.table_state.as_mut()
+            && let Some(cell) = table_state.current_cell.as_mut()
+        {
+            cell.push_annotated(std::mem::take(&mut annotated));
         }
     }
 
@@ -1037,7 +1082,7 @@ where
         let available_width = self.available_table_width(column_count);
         let widths =
             self.compute_column_widths(&header, &rows, &table_state.alignments, available_width);
-        let spillover_lines: Vec<Line<'static>> = spillover_rows
+        let spillover_lines: Vec<HyperlinkLine> = spillover_rows
             .into_iter()
             .flat_map(|spillover| spillover.lines)
             .collect();
@@ -1296,7 +1341,7 @@ where
         right: char,
         column_widths: &[usize],
         style: Style,
-    ) -> Line<'static> {
+    ) -> HyperlinkLine {
         let mut spans = Vec::with_capacity(column_widths.len() * 2 + 1);
         spans.push(Span::styled(String::from(left), style));
         for (idx, width) in column_widths.iter().enumerate() {
@@ -1307,7 +1352,7 @@ where
                 spans.push(Span::styled(String::from(sep), style));
             }
         }
-        Line::from(spans)
+        HyperlinkLine::new(Line::from(spans))
     }
 
     fn render_table_row(
@@ -1316,8 +1361,8 @@ where
         column_widths: &[usize],
         alignments: &[Alignment],
         border_style: Style,
-    ) -> Vec<Line<'static>> {
-        let wrapped_cells: Vec<Vec<Line<'static>>> = row
+    ) -> Vec<HyperlinkLine> {
+        let wrapped_cells: Vec<Vec<HyperlinkLine>> = row
             .iter()
             .zip(column_widths)
             .map(|(cell, width)| self.wrap_cell(cell, *width))
@@ -1330,11 +1375,11 @@ where
             spans.push(Span::styled("│", border_style));
             for (column, width) in column_widths.iter().enumerate() {
                 spans.push(Span::raw(" "));
-                let line = wrapped_cells[column]
+                let mut line = wrapped_cells[column]
                     .get(row_line)
                     .cloned()
                     .unwrap_or_default();
-                let line_width = Self::line_display_width(&line);
+                let line_width = Self::line_display_width(&line.line);
                 let remaining = width.saturating_sub(line_width);
                 let (left_padding, right_padding) = match alignments[column] {
                     Alignment::Left | Alignment::None => (0, remaining),
@@ -1344,14 +1389,37 @@ where
                 if left_padding > 0 {
                     spans.push(Span::raw(" ".repeat(left_padding)));
                 }
-                spans.extend(line.spans);
+                spans.append(&mut line.line.spans);
                 if right_padding > 0 {
                     spans.push(Span::raw(" ".repeat(right_padding)));
                 }
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled("│", border_style));
             }
-            out.push(Line::from(spans));
+            let mut out_line = HyperlinkLine::new(Line::from(spans));
+            // Link ranges have already been shifted while each cell content was appended.
+            // Collect them during a second identical position walk below.
+            let mut column_start = 1usize;
+            for (column, width) in column_widths.iter().enumerate() {
+                column_start += 1;
+                if let Some(line) = wrapped_cells[column].get(row_line) {
+                    let remaining = width.saturating_sub(Self::line_display_width(&line.line));
+                    let left_padding = match alignments[column] {
+                        Alignment::Left | Alignment::None => 0,
+                        Alignment::Center => remaining / 2,
+                        Alignment::Right => remaining,
+                    };
+                    out_line
+                        .hyperlinks
+                        .extend(line.hyperlinks.iter().cloned().map(|mut link| {
+                            link.columns = link.columns.start + column_start + left_padding
+                                ..link.columns.end + column_start + left_padding;
+                            link
+                        }));
+                }
+                column_start += *width + 2;
+            }
+            out.push(out_line);
         }
         out
     }
@@ -1366,13 +1434,17 @@ where
         header: &[TableCell],
         rows: &[Vec<TableCell>],
         alignments: &[Alignment],
-    ) -> Vec<Line<'static>> {
+    ) -> Vec<HyperlinkLine> {
         let mut out = Vec::new();
-        out.push(Line::from(Self::row_to_pipe_string(header)));
-        out.push(Line::from(Self::alignments_to_pipe_delimiter(alignments)));
+        out.push(annotate_web_urls_in_line(Line::from(
+            Self::row_to_pipe_string(header),
+        )));
+        out.push(HyperlinkLine::new(Line::from(
+            Self::alignments_to_pipe_delimiter(alignments),
+        )));
         out.extend(
             rows.iter()
-                .map(|row| Line::from(Self::row_to_pipe_string(row))),
+                .map(|row| annotate_web_urls_in_line(Line::from(Self::row_to_pipe_string(row)))),
         );
         out
     }
@@ -1413,21 +1485,24 @@ where
     /// Each logical line within the cell (separated by hard breaks) is wrapped
     /// independently.  Empty cells produce a single blank line so the row grid
     /// stays aligned.
-    fn wrap_cell(&self, cell: &TableCell, width: usize) -> Vec<Line<'static>> {
+    fn wrap_cell(&self, cell: &TableCell, width: usize) -> Vec<HyperlinkLine> {
         if cell.lines.is_empty() {
-            return vec![Line::default()];
+            return vec![HyperlinkLine::new(Line::default())];
         }
         let mut wrapped = Vec::new();
         for source_line in &cell.lines {
-            let rendered = word_wrap_line(source_line, RtOptions::new(width.max(1)));
+            let rendered = word_wrap_line(&source_line.line, RtOptions::new(width.max(1)))
+                .into_iter()
+                .map(|line| line_to_static(&line))
+                .collect::<Vec<_>>();
             if rendered.is_empty() {
-                wrapped.push(Line::default());
+                wrapped.push(HyperlinkLine::new(Line::default()));
             } else {
-                push_owned_lines(&rendered, &mut wrapped);
+                wrapped.extend(remap_wrapped_line(source_line, rendered));
             };
         }
         if wrapped.is_empty() {
-            wrapped.push(Line::default());
+            wrapped.push(HyperlinkLine::new(Line::default()));
         }
         wrapped
     }
@@ -1539,7 +1614,7 @@ where
     fn cell_display_width(cell: &TableCell) -> usize {
         cell.lines
             .iter()
-            .map(Self::line_display_width)
+            .map(|line| Self::line_display_width(&line.line))
             .max()
             .unwrap_or(0)
     }
@@ -1580,11 +1655,25 @@ where
                 // line to avoid detached url lines.
                 if self.in_table_cell() {
                     self.push_span_to_table_cell(" (".into());
-                    self.push_span_to_table_cell(Span::styled(link.destination, self.styles.link));
+                    let mut destination = HyperlinkLine::new(Line::default());
+                    destination.push_span(
+                        Span::styled(link.destination.clone(), self.styles.link),
+                        web_destination(&link.destination).as_deref(),
+                    );
+                    if let Some(table_state) = self.table_state.as_mut()
+                        && let Some(cell) = table_state.current_cell.as_mut()
+                    {
+                        cell.push_annotated(destination);
+                    }
                     self.push_span_to_table_cell(")".into());
                 } else {
                     self.push_span(" (".into());
-                    self.push_span(Span::styled(link.destination, self.styles.link));
+                    let mut destination = HyperlinkLine::new(Line::default());
+                    destination.push_span(
+                        Span::styled(link.destination.clone(), self.styles.link),
+                        web_destination(&link.destination).as_deref(),
+                    );
+                    self.push_annotated(destination);
                     self.push_span(")".into());
                 }
             } else if let Some(local_target_display) = link.local_target_display {
@@ -1618,7 +1707,7 @@ where
     }
 
     fn flush_current_line(&mut self) {
-        if let Some(line) = self.current_line_content.take() {
+        if let Some(mut line) = self.current_line_content.take() {
             let style = self.current_line_style;
             // NB we don't wrap code in code blocks, in order to preserve whitespace for copy/paste.
             if !self.current_line_in_code_block
@@ -1627,15 +1716,23 @@ where
                 let opts = RtOptions::new(width)
                     .initial_indent(self.current_initial_indent.clone().into())
                     .subsequent_indent(self.current_subsequent_indent.clone().into());
-                for wrapped in adaptive_wrap_line(&line, opts) {
-                    let owned = line_to_static(&wrapped).style(style);
-                    self.push_output_line(owned);
+                let wrapped = adaptive_wrap_line(&line.line, opts)
+                    .into_iter()
+                    .map(|wrapped| line_to_static(&wrapped))
+                    .collect();
+                for wrapped in remap_wrapped_line(&line, wrapped) {
+                    self.push_output_line(wrapped.style(style));
                 }
             } else {
                 let mut spans = self.current_initial_indent.clone();
-                let mut line = line;
-                spans.append(&mut line.spans);
-                self.push_output_line(Line::from_iter(spans).style(style));
+                let shift = spans.iter().map(|span| span.content.width()).sum::<usize>();
+                spans.append(&mut line.line.spans);
+                for hyperlink in &mut line.hyperlinks {
+                    hyperlink.columns =
+                        hyperlink.columns.start + shift..hyperlink.columns.end + shift;
+                }
+                line.line = Line::from_iter(spans);
+                self.push_output_line(line.style(style));
             }
             self.current_initial_indent.clear();
             self.current_subsequent_indent.clear();
@@ -1657,18 +1754,23 @@ where
             .any(|ctx| ctx.prefix.iter().any(|p| p.content.contains('>')))
     }
 
-    fn push_prewrapped_line(&mut self, line: Line<'static>, pending_marker_line: bool) {
+    fn push_prewrapped_line(&mut self, mut line: HyperlinkLine, pending_marker_line: bool) {
         self.flush_current_line();
         let blockquote_active = self.is_blockquote_active();
         let style = if blockquote_active {
-            self.styles.blockquote.patch(line.style)
+            self.styles.blockquote.patch(line.line.style)
         } else {
-            line.style
+            line.line.style
         };
 
         let mut spans = self.prefix_spans(pending_marker_line);
-        spans.extend(line.spans);
-        self.push_output_line(Line::from(spans).style(style));
+        let shift = spans.iter().map(|span| span.content.width()).sum::<usize>();
+        spans.append(&mut line.line.spans);
+        for hyperlink in &mut line.hyperlinks {
+            hyperlink.columns = hyperlink.columns.start + shift..hyperlink.columns.end + shift;
+        }
+        line.line = Line::from(spans);
+        self.push_output_line(line.style(style));
     }
 
     fn push_line(&mut self, line: Line<'static>) {
@@ -1684,33 +1786,74 @@ where
         self.current_initial_indent = self.prefix_spans(was_pending);
         self.current_subsequent_indent = self.prefix_spans(/*pending_marker_line*/ false);
         self.current_line_style = style;
-        self.current_line_content = Some(line);
+        self.current_line_content = Some(HyperlinkLine::new(line));
         self.current_line_in_code_block = self.in_code_block;
         self.line_ends_with_local_link_target = false;
 
         self.pending_marker_line = false;
     }
 
+    fn push_hyperlink_line(&mut self, line: HyperlinkLine) {
+        let hyperlinks = line.hyperlinks;
+        self.push_line(line.line);
+        if let Some(current) = self.current_line_content.as_mut() {
+            current.hyperlinks = hyperlinks;
+        }
+    }
+
     fn push_span(&mut self, span: Span<'static>) {
         if let Some(line) = self.current_line_content.as_mut() {
-            line.push_span(span);
+            line.line.push_span(span);
         } else {
             self.push_line(Line::from(vec![span]));
         }
     }
 
+    fn push_annotated(&mut self, mut appended: HyperlinkLine) {
+        if self.current_line_content.is_none() {
+            self.push_line(Line::default());
+        }
+        if let Some(line) = self.current_line_content.as_mut() {
+            let shift = line.width();
+            line.line.spans.append(&mut appended.line.spans);
+            line.hyperlinks
+                .extend(appended.hyperlinks.into_iter().map(|mut link| {
+                    link.columns = link.columns.start + shift..link.columns.end + shift;
+                    link
+                }));
+        }
+    }
+
+    fn push_text_spans(&mut self, text: &str, style: Style) {
+        let span = Span::styled(text.to_string(), style);
+        let destination = self
+            .link
+            .as_ref()
+            .and_then(|link| web_destination(&link.destination));
+        let annotated = if let Some(destination) = destination {
+            let mut annotated = HyperlinkLine::new(Line::default());
+            annotated.push_span(span, Some(&destination));
+            annotated
+        } else if self.in_code_block {
+            HyperlinkLine::new(Line::from(span))
+        } else {
+            annotate_web_urls_in_line(Line::from(span))
+        };
+        self.push_annotated(annotated);
+    }
+
     fn push_blank_line(&mut self) {
         self.flush_current_line();
         if self.indent_stack.iter().all(|ctx| ctx.is_list) {
-            self.push_output_line(Line::default());
+            self.push_output_line(HyperlinkLine::new(Line::default()));
         } else {
             self.push_line(Line::default());
             self.flush_current_line();
         }
     }
 
-    fn push_output_line(&mut self, line: Line<'static>) {
-        self.text.lines.push(line);
+    fn push_output_line(&mut self, line: HyperlinkLine) {
+        self.text.push(line);
     }
 
     fn prefix_spans(&self, pending_marker_line: bool) -> Vec<Span<'static>> {
@@ -2167,7 +2310,8 @@ mod tests {
         let rendered = wrapped
             .iter()
             .map(|line| {
-                line.spans
+                line.line
+                    .spans
                     .iter()
                     .map(|span| span.content.clone())
                     .collect::<String>()
@@ -2402,5 +2546,79 @@ mod tests {
             /*has_table_pipe_syntax*/ true,
         );
         assert!(!W::is_spillover_row(&row, Some(&next)));
+    }
+
+    #[test]
+    fn annotates_explicit_web_link_label_and_visible_destination() {
+        let lines = render_markdown_lines_with_width_and_cwd(
+            "See [docs](https://example.com/reference).",
+            /*width*/ Some(80),
+            /*cwd*/ None,
+        );
+        let links = lines
+            .iter()
+            .flat_map(|line| line.hyperlinks.iter())
+            .collect::<Vec<_>>();
+
+        assert_eq!(links.len(), 2);
+        assert!(
+            links
+                .iter()
+                .all(|link| link.destination == "https://example.com/reference")
+        );
+    }
+
+    #[test]
+    fn wrapped_table_url_fragments_keep_complete_web_destination() {
+        let destination = "https://example.com/a/very/long/path/to/a/table/artifact";
+        let markdown = format!("| Item | URL |\n| --- | --- |\n| report | {destination} |\n");
+        let lines = render_markdown_lines_with_width_and_cwd(
+            &markdown,
+            /*width*/ Some(32),
+            /*cwd*/ None,
+        );
+        let linked_rows = lines
+            .iter()
+            .filter(|line| !line.hyperlinks.is_empty())
+            .collect::<Vec<_>>();
+
+        assert!(
+            linked_rows.len() > 1,
+            "expected a URL wrapped across table rows"
+        );
+        assert!(linked_rows.iter().all(|line| {
+            line.hyperlinks
+                .iter()
+                .all(|link| link.destination == destination)
+        }));
+    }
+
+    #[test]
+    fn does_not_annotate_code_or_non_web_markdown_links() {
+        let markdown = "`https://example.com/inline`\n\n```text\nhttps://example.com/block\n```\n\n[mail](mailto:test@example.com)";
+        let lines = render_markdown_lines_with_width_and_cwd(
+            markdown,
+            /*width*/ Some(80),
+            /*cwd*/ None,
+        );
+
+        assert!(lines.iter().all(|line| line.hyperlinks.is_empty()));
+    }
+
+    #[test]
+    fn pipe_table_fallback_keeps_web_annotations() {
+        let destination = "https://example.com/a/long/path";
+        let markdown = format!("| URL | Value |\n| --- | --- |\n| {destination} | ok |\n");
+        let lines = render_markdown_lines_with_width_and_cwd(
+            &markdown,
+            /*width*/ Some(5),
+            /*cwd*/ None,
+        );
+
+        assert!(lines.iter().any(|line| {
+            line.hyperlinks
+                .iter()
+                .any(|link| link.destination == destination)
+        }));
     }
 }
